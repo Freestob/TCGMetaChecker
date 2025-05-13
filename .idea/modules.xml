@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/TCGMetaCheker.iml" filepath="$PROJECT_DIR$/.idea/TCGMetaCheker.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/TCGMetaChecker.iml" filepath="$PROJECT_DIR$/.idea/TCGMetaChecker.iml" />
     </modules>
   </component>
 </project>
