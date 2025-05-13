@@ -6,7 +6,6 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"sync"
 	//tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -17,19 +16,18 @@ import (
 //	err    error
 //}
 
-type Card struct {
+type card struct {
 	name  string
 	count int
 	price float64
 }
-type Deck struct {
-	cards     []Card
-	name      string
-	format    string
-	archetype string
+type deck struct {
+	cards  []card
+	name   string
+	format string
 }
-type Archetype struct {
-	decks  []*Deck
+type archetype struct {
+	decks  []deck
 	name   string
 	format string
 }
@@ -100,89 +98,40 @@ func main() {
 	// Set a timeout for requests
 	//c.SetRequestTimeout(15 * time.Second) // 15 seconds should be plenty
 
-	//var cards []card
-	//var decks []deck
-	//var archetypes []archetype
-
-	results := make(map[string]*Archetype)
-	var resultsMutex sync.Mutex
+	var cards []card
+	var decks []deck
+	var archetypes []archetype
 
 	deckName := ""
 	archetypeSelector := "a.text-uppercase"
+	ctx := colly.NewContext()
 	// Get archetypes
 	c.OnHTML(archetypeSelector, func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 		fmt.Printf("Link: %s\n", link)
 		archetypeName := strings.ReplaceAll(e.Text, " ", "-")
-		ctx := colly.NewContext()
-
 		fmt.Printf("Name: %s\n", e.Text)
 		if archetypeName != "" && strings.Contains(link, url) {
 			fmt.Printf("Visiting %s\n", link)
-			ctx.Put("archetypeName", archetypeSelector)
-
-			resultsMutex.Lock()
-			if _, exists := results[archetypeName]; !exists {
-				results[archetypeName] = &Archetype{
-					name:   archetypeName,
-					decks:  []*Deck{},
-					format: "Pioneer",
-				}
-			}
-			resultsMutex.Unlock()
 			err := e.Request.Visit(link)
 			if err != nil {
 				log.Printf("Error visiting link %s: %v\n", link, err)
 			}
+			archetype := archetype{
+				decks:  decks,
+				name:   e.Text,
+				format: "Pioneer",
+			}
+			archetypes = append(archetypes, archetype)
 		}
 	})
 	tableLinkSelector := "table.clickable.table.table-striped.hidden-xs a[href]"
 	//Get decks from archetype page
 	c.OnHTML(tableLinkSelector, func(e *colly.HTMLElement) {
-		archetypeName := e.Request.Ctx.Get("archetypeName")
 		link := e.Attr("href")
 		if link != "" && strings.Contains(link, "-decklist-") {
 			deckName = e.Text
-			ctx := colly.NewContext()
-			ctx.Put("archetypeName", archetypeName)
 			ctx.Put("deckName", deckName)
-
-			resultsMutex.Lock()
-			if parentArchetype, exists := results[archetypeName]; exists {
-				deckExists := false
-				for _, existingDeck := range parentArchetype.decks {
-					if existingDeck.name == deckName {
-						deckExists = true
-						break
-					}
-				}
-				if !deckExists {
-					parentArchetype.decks = append(parentArchetype.decks, &Deck{
-						name:   deckName,
-						format: "Pioneer",
-						cards:  []Card{},
-					})
-				} else {
-					log.Printf("WARN: Archetype '%s' not found in results when adding deck '%s'. Creating placeholder.", archetypeName, deckName)
-					results[archetypeName] = &Archetype{
-						name:   archetypeName,
-						format: "Pioneer",
-						decks: []*Deck{
-							{
-								name:   deckName,
-								format: "Pioneer",
-								cards:  []Card{},
-							},
-						},
-					}
-				}
-				resultsMutex.Unlock()
-
-				err := e.Request.Visit(link)
-				if err != nil {
-					log.Printf("Error visiting link %s: %v\n", link, err)
-				}
-			}
 			fmt.Printf("Visiting %s\n", link)
 			err := e.Request.Visit(link)
 			if err != nil {
