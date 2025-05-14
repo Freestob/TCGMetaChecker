@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/gocolly/colly"
+	"github.com/gocolly/colly/v2"
 	"log"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,20 +19,22 @@ import (
 //}
 
 type Card struct {
-	name  string
-	count int
-	price float64
+	Name  string
+	Count int
+	Price float64
 }
 type Deck struct {
-	cards     []Card
-	name      string
-	format    string
-	archetype string
+	Cards     []Card
+	Name      string
+	Format    string
+	Archetype string
+	URL       string
 }
 type Archetype struct {
-	decks  []*Deck
-	name   string
-	format string
+	Decks  []*Deck
+	Name   string
+	Format string
+	URL    string
 }
 
 //func checkServer() tea.Msg {
@@ -72,18 +75,20 @@ type Archetype struct {
 //	return m, nil
 //}
 
-//func (m model) View() string {
-//	if m.err != nil {
-//		return fmt.Sprintf("\nWe had some trouble: %v\n\n", m.err)
-//	}
+//	func (m model) View() string {
+//		if m.err != nil {
+//			return fmt.Sprintf("\nWe had some trouble: %v\n\n", m.err)
+//		}
 //
-//	s := fmt.Sprintf("Checking %s ...", url)
+//		s := fmt.Sprintf("Checking %s ...", url)
 //
-//	if m.status > 0 {
-//		s += fmt.Sprintf("%d %s!", m.status, http.StatusText(m.status))
+//		if m.status > 0 {
+//			s += fmt.Sprintf("%d %s!", m.status, http.StatusText(m.status))
+//		}
+//		return "\n" + s + "\n\n"
 //	}
-//	return "\n" + s + "\n\n"
-//}
+var results = make(map[string]*Archetype)
+var resultsMutex sync.Mutex
 
 func main() {
 	//if _, err := tea.NewProgram(model{}).Run(); err != nil {
@@ -91,137 +96,175 @@ func main() {
 	//	os.Exit(1)
 	//}
 
-	// Instantiate default collector
-	url := "https://mtgdecks.net/Pioneer/rakdos-demons"
+	startURL := "https://mtgdecks.net/Pioneer/"
+	parsedStartURL, err := url.Parse(startURL)
+	if err != nil {
+		log.Fatalf("Invalid start URL: %v", err)
+	}
+
+	allowedDomain := parsedStartURL.Hostname()
 
 	// Instantiate default collector
-	c := colly.NewCollector()
-
-	// Set a timeout for requests
-	//c.SetRequestTimeout(15 * time.Second) // 15 seconds should be plenty
-
-	//var cards []card
-	//var decks []deck
-	//var archetypes []archetype
+	c := colly.NewCollector(
+		colly.AllowedDomains(allowedDomain))
 
 	results := make(map[string]*Archetype)
 	var resultsMutex sync.Mutex
 
-	deckName := ""
 	archetypeSelector := "a.text-uppercase"
+	format := "Pioneer"
+
 	// Get archetypes
 	c.OnHTML(archetypeSelector, func(e *colly.HTMLElement) {
 		link := e.Attr("href")
-		fmt.Printf("Link: %s\n", link)
 		archetypeName := strings.ReplaceAll(e.Text, " ", "-")
-		ctx := colly.NewContext()
+		absoluteArchetypeURL := e.Request.AbsoluteURL(link)
+		tier := e.Attr("tr.tier-1.tier-all")
+		if tier == "" {
+			return
+		}
+		if archetypeName != "" &&
+			strings.HasPrefix(absoluteArchetypeURL, startURL) &&
+			absoluteArchetypeURL != startURL &&
+			!strings.Contains(link, "-decklist-") {
 
-		fmt.Printf("Name: %s\n", e.Text)
-		if archetypeName != "" && strings.Contains(link, url) {
-			fmt.Printf("Visiting %s\n", link)
-			ctx.Put("archetypeName", archetypeSelector)
+			fmt.Printf("Found Archetype: '%s' -> %s\n", archetypeName, absoluteArchetypeURL)
+
+			ctx := colly.NewContext()
+			ctx.Put("archetypeName", archetypeName)
+			ctx.Put("archetypeURL", absoluteArchetypeURL)
+			ctx.Put("format", format)
 
 			resultsMutex.Lock()
-			if _, exists := results[archetypeName]; !exists {
-				results[archetypeName] = &Archetype{
-					name:   archetypeName,
-					decks:  []*Deck{},
-					format: "Pioneer",
+
+			if _, exists := results[absoluteArchetypeURL]; !exists {
+				results[absoluteArchetypeURL] = &Archetype{
+					Name:   archetypeName,
+					Format: format,
+					Decks:  []*Deck{},
 				}
 			}
 			resultsMutex.Unlock()
-			err := e.Request.Visit(link)
+			err := c.Request("GET", link, nil, ctx, nil)
 			if err != nil {
 				log.Printf("Error visiting link %s: %v\n", link, err)
 			}
 		}
 	})
+
 	tableLinkSelector := "table.clickable.table.table-striped.hidden-xs a[href]"
+
 	//Get decks from archetype page
 	c.OnHTML(tableLinkSelector, func(e *colly.HTMLElement) {
 		archetypeName := e.Request.Ctx.Get("archetypeName")
+		archetypeUrl := e.Request.Ctx.Get("archetypeURL")
+		format := e.Request.Ctx.Get("format")
+
+		if archetypeUrl == "" {
+			log.Printf("WARN: archetypeUrl missing from context on page %s. Skipping deck", e.Request.URL)
+			return
+		}
+
 		link := e.Attr("href")
+
+		absoluteDeckUrl := e.Request.AbsoluteURL(link)
 		if link != "" && strings.Contains(link, "-decklist-") {
-			deckName = e.Text
-			ctx := colly.NewContext()
-			ctx.Put("archetypeName", archetypeName)
-			ctx.Put("deckName", deckName)
+			currentDeckNameFromLink := strings.TrimSpace(e.Text)
+			if currentDeckNameFromLink == "" {
+				currentDeckNameFromLink = "Unknown Deck Name"
+			}
+			fmt.Printf("Found Deck: '%s' (for Archetype '%s') -> %s\n", currentDeckNameFromLink, archetypeName, archetypeUrl)
+
+			deckPageCtx := colly.NewContext()
+			deckPageCtx.Put("archetypeUrl", archetypeUrl)
+			deckPageCtx.Put("deckName", currentDeckNameFromLink)
+			deckPageCtx.Put("format", format)
+			deckPageCtx.Put("deckUrl", absoluteDeckUrl)
 
 			resultsMutex.Lock()
-			if parentArchetype, exists := results[archetypeName]; exists {
-				deckExists := false
-				for _, existingDeck := range parentArchetype.decks {
-					if existingDeck.name == deckName {
-						deckExists = true
+
+			parentArchetype, exists := results[archetypeUrl]
+			if exists {
+				deckExistsInArchetype := false
+				for _, existingDeck := range parentArchetype.Decks {
+					if existingDeck.URL == absoluteDeckUrl {
+						deckExistsInArchetype = true
 						break
 					}
 				}
-				if !deckExists {
-					parentArchetype.decks = append(parentArchetype.decks, &Deck{
-						name:   deckName,
-						format: "Pioneer",
-						cards:  []Card{},
+				if !deckExistsInArchetype {
+					parentArchetype.Decks = append(parentArchetype.Decks, &Deck{
+						Name:   currentDeckNameFromLink,
+						URL:    absoluteDeckUrl,
+						Format: format,
+						Cards:  []Card{},
 					})
-				} else {
-					log.Printf("WARN: Archetype '%s' not found in results when adding deck '%s'. Creating placeholder.", archetypeName, deckName)
-					results[archetypeName] = &Archetype{
-						name:   archetypeName,
-						format: "Pioneer",
-						decks: []*Deck{
-							{
-								name:   deckName,
-								format: "Pioneer",
-								cards:  []Card{},
-							},
-						},
-					}
 				}
-				resultsMutex.Unlock()
-
-				err := e.Request.Visit(link)
-				if err != nil {
-					log.Printf("Error visiting link %s: %v\n", link, err)
-				}
+			} else {
+				log.Printf("WARN: Archetype (URL: %s) not found in results map when trying to add deck '%s'.", archetypeUrl, currentDeckNameFromLink)
 			}
-			fmt.Printf("Visiting %s\n", link)
-			err := e.Request.Visit(link)
+			resultsMutex.Unlock()
+			err := c.Request("GET", absoluteDeckUrl, nil, deckPageCtx, nil)
 			if err != nil {
 				log.Printf("Error visiting link %s: %v\n", link, err)
 			}
-			deck := deck{
-				cards:  cards,
-				name:   e.Text,
-				format: "Pioneer",
-			}
-
-			decks = append(decks, deck)
 		}
 	})
+
 	// Get cards from a deck
 	c.OnHTML("tr.cardItem", func(e *colly.HTMLElement) {
+		archetypeUrl := e.Request.Ctx.Get("archetypeUrl")
+		deckUrl := e.Request.Ctx.Get("deckUrl")
 
+		if archetypeUrl == "" || deckUrl == "" {
+			log.Printf("WARN: archetypeUrl or deckUrl missing from context for card on item on %s. Skipping card", e.Request.URL.String())
+			return
+		}
+		deckURL := e.Request.Ctx.Get("deckUrl")
 		name := e.Attr("data-card-id")
 		req := e.Attr("data-required")
 		tcg := e.Attr("tcgplayer")
+		if name == "" || req == "" {
+			log.Printf("WARN: Missing card name or required count on %s", e.Request.URL.String())
+			return
+		}
 		count, err := strconv.Atoi(req)
 		if err != nil {
-			fmt.Println("error parsing count")
+			fmt.Printf("Error parsing count for card '%s':  %v", name, err)
 			return
 		}
 		price, err := strconv.ParseFloat(tcg, 32)
 		if err != nil {
-			fmt.Println("error parsing price")
+			fmt.Printf("Error parsing  for card '%s', using 0.0: %v", name, err)
+			price = 0.0
 		}
-		card := card{
-			name:  name,
-			count: count,
-			price: price,
+		card := Card{
+			Name:  name,
+			Count: count,
+			Price: price,
 		}
-		cards = append(cards, card)
+
+		resultsMutex.Lock()
+		defer resultsMutex.Unlock()
+		if parentArchetype, exists := results[archetypeUrl]; exists {
+			foundDeck := false
+
+			for _, existingDeck := range parentArchetype.Decks {
+				if existingDeck.URL == deckURL {
+					existingDeck.Cards = append(existingDeck.Cards, card)
+					foundDeck = true
+					break
+				}
+			}
+			if !foundDeck {
+				log.Printf("WARN  Deck URL '%s' not found in results when adding deck '%s'.", deckURL, name)
+			}
+		}
 	})
 
 	// Set a User-Agent to mimic a browser
 	c.OnRequest(func(r *colly.Request) {
+		fmt.Printf("Visiting: %s\n", r.URL)
 		r.Headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36")
 	})
 
@@ -232,19 +275,30 @@ func main() {
 
 	// After scraping is done
 	c.OnScraped(func(r *colly.Response) {
-		for _, deck := range decks {
-			fmt.Printf("%s\n", deck.name)
-			for _, card := range deck.cards {
-				fmt.Printf("%s\n", card.name)
-			}
-
-		}
 		fmt.Println("\nFinished scraping", r.Request.URL)
 	})
 
 	// Start scraping
-	err := c.Visit(url)
+	fmt.Println("\nVisiting " + startURL)
+	err = c.Visit(startURL)
 	if err != nil {
 		log.Fatal("Fatal error visiting URL:", err)
+	}
+
+	for _, archetypeData := range results {
+		fmt.Printf("\nArchetype: %s (Format: %s)\n", archetypeData.Name, archetypeData.Format)
+		fmt.Printf("  Found %d Decks\n", len(archetypeData.Decks))
+
+		for i, deckData := range archetypeData.Decks {
+			deckCardCount := 0
+			deckTotalPrice := 0.0
+			for _, card := range deckData.Cards {
+				deckCardCount += card.Count
+				deckTotalPrice += float64(card.Count) * card.Price
+			}
+
+			fmt.Printf("   Deck %d: %s (URL: %s)\n", i+1, deckData.Name, deckData.URL)
+			fmt.Printf("   Cards: %d | Estimated Price: %.2f\n", deckCardCount, deckTotalPrice)
+		}
 	}
 }
