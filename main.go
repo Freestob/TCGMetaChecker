@@ -87,8 +87,6 @@ type Archetype struct {
 //		}
 //		return "\n" + s + "\n\n"
 //	}
-var results = make(map[string]*Archetype)
-var resultsMutex sync.Mutex
 
 func main() {
 	//if _, err := tea.NewProgram(model{}).Run(); err != nil {
@@ -111,45 +109,51 @@ func main() {
 	results := make(map[string]*Archetype)
 	var resultsMutex sync.Mutex
 
-	archetypeSelector := "a.text-uppercase"
 	format := "Pioneer"
 
+	archetypeTable := "table#allArchetypes.clickable.table.sortable.table-striped"
 	// Get archetypes
-	c.OnHTML(archetypeSelector, func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		archetypeName := strings.ReplaceAll(e.Text, " ", "-")
-		absoluteArchetypeURL := e.Request.AbsoluteURL(link)
-		tier := e.Attr("tr.tier-1.tier-all")
-		if tier == "" {
-			return
-		}
-		if archetypeName != "" &&
-			strings.HasPrefix(absoluteArchetypeURL, startURL) &&
-			absoluteArchetypeURL != startURL &&
-			!strings.Contains(link, "-decklist-") {
+	c.OnHTML(archetypeTable, func(e *colly.HTMLElement) {
+		e.ForEach("tr", func(_ int, el *colly.HTMLElement) {
+			tierSpan := "td span.text-uppercase.label.label-default"
+			tier := el.DOM.Find(tierSpan).Text()
+			tier = strings.TrimSpace(tier)
+			if /*tier == "tier-2" || */ tier == "tier-1" {
+				archetypeSpan := "td.sort strong a.text-uppercase"
+				archetypeName := el.DOM.Find(archetypeSpan).Text()
 
-			fmt.Printf("Found Archetype: '%s' -> %s\n", archetypeName, absoluteArchetypeURL)
+				fmt.Printf("archetypeName=%s\n", archetypeName)
+				absoluteArchetypeURL := e.Request.AbsoluteURL(archetypeName)
+				fmt.Printf("absoluteArchetypeURL=%s\n", absoluteArchetypeURL)
+				if archetypeName != "" &&
+					strings.HasPrefix(absoluteArchetypeURL, startURL) &&
+					absoluteArchetypeURL != startURL &&
+					!strings.Contains(archetypeName, "-decklist-") {
 
-			ctx := colly.NewContext()
-			ctx.Put("archetypeName", archetypeName)
-			ctx.Put("archetypeURL", absoluteArchetypeURL)
-			ctx.Put("format", format)
+					fmt.Printf("Found Archetype: '%s' -> %s\n", archetypeName, absoluteArchetypeURL)
 
-			resultsMutex.Lock()
+					ctx := colly.NewContext()
+					ctx.Put("archetypeName", archetypeName)
+					ctx.Put("archetypeURL", absoluteArchetypeURL)
+					ctx.Put("format", format)
 
-			if _, exists := results[absoluteArchetypeURL]; !exists {
-				results[absoluteArchetypeURL] = &Archetype{
-					Name:   archetypeName,
-					Format: format,
-					Decks:  []*Deck{},
+					resultsMutex.Lock()
+
+					if _, exists := results[absoluteArchetypeURL]; !exists {
+						results[absoluteArchetypeURL] = &Archetype{
+							Name:   archetypeName,
+							Format: format,
+							Decks:  []*Deck{},
+						}
+					}
+					resultsMutex.Unlock()
+					err := c.Request("GET", absoluteArchetypeURL, nil, ctx, nil)
+					if err != nil {
+						log.Printf("Error visiting link %s: %v\n", absoluteArchetypeURL, err)
+					}
 				}
 			}
-			resultsMutex.Unlock()
-			err := c.Request("GET", link, nil, ctx, nil)
-			if err != nil {
-				log.Printf("Error visiting link %s: %v\n", link, err)
-			}
-		}
+		})
 	})
 
 	tableLinkSelector := "table.clickable.table.table-striped.hidden-xs a[href]"
